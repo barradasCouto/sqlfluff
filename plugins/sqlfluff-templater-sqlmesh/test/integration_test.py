@@ -82,13 +82,12 @@ gateways:
 
             # Try to create SQLMesh context
             try:
-                context = templater.sqlmesh_context
+                context = templater._get_or_create_sqlmesh_context()
                 assert context is not None
             except ImportError:
                 pytest.skip("SQLMesh not installed")
             except Exception as e:
-                # Log the error but don't fail the test
-                print(f"SQLMesh context creation failed: {e}")
+                pytest.fail(f"SQLMesh context creation unexpectedly failed: {e}")
 
     def test_model_name_extraction_for_audits(self):
         """Test audit file names are resolved like model files."""

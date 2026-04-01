@@ -151,8 +151,7 @@ class TestSQLMeshFixtures:
         except ImportError:
             pytest.skip("SQLMesh not installed")
         except Exception as e:
-            # Log the error for debugging but don't fail
-            print(f"SQLMesh processing failed: {e}")
+            pytest.fail(f"SQLMesh processing unexpectedly failed: {e}")
 
     def test_fixture_completeness(self, fixture_dir):
         """Test that all fixture files exist and are readable."""

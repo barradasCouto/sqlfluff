@@ -16,9 +16,7 @@ from functools import cached_property
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
     Optional,
-    TypeVar,
 )
 
 from sqlfluff.core.errors import SQLTemplaterError
@@ -31,57 +29,6 @@ if TYPE_CHECKING:  # pragma: no cover
 
 # Instantiate the templater logger
 templater_logger = logging.getLogger("sqlfluff.templater")
-
-
-def is_sqlmesh_exception(exception: Optional[BaseException]) -> bool:
-    """Check whether this looks like a SQLMesh exception."""
-    # None is not a SQLMesh exception.
-    if not exception:
-        return False
-    return exception.__class__.__module__.startswith("sqlmesh")
-
-
-def _extract_error_detail(exception: BaseException) -> str:
-    """Serialise an exception into a string for reuse in other messages."""
-    return (
-        f"{exception.__class__.__module__}.{exception.__class__.__name__}: {exception}"
-    )
-
-
-T = TypeVar("T")
-
-
-def handle_sqlmesh_errors(
-    error_class: type[Exception], preamble: str
-) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """A decorator to safely catch SQLMesh exceptions and raise native ones.
-
-    NOTE: This looks and behaves a lot like a context manager, but it's
-    important that it is *not* a context manager so that it can effectively
-    strip the context from handled exceptions. That isn't possible (as far
-    as we've tried) within a context manager.
-
-    SQLMesh exceptions don't pickle nicely, and python exception context tries
-    very hard to make sure that the exception context of any new exceptions
-    is preserved. This means that if we want to remove the context from any
-    exceptions (so they can be pickled), we need to explicitly catch and
-    reraise outside of the context of whatever call made them.
-    """
-
-    def decorator(wrapped_method: Callable[..., T]) -> Callable[..., T]:
-        def wrapped_method_inner(*args, **kwargs) -> T:
-            try:
-                return wrapped_method(*args, **kwargs)
-            except Exception as err:
-                if is_sqlmesh_exception(err):
-                    _detail = _extract_error_detail(err)
-                    raise error_class(preamble + _detail)
-                # If it's not a SQLMesh exception, just re-raise as is.
-                raise
-
-        return wrapped_method_inner
-
-    return decorator
 
 
 class SQLMeshTemplater(JinjaTemplater):
@@ -152,9 +99,23 @@ class SQLMeshTemplater(JinjaTemplater):
         except ImportError:
             return "not installed"
 
-    @cached_property
-    def sqlmesh_context(self):
-        """Loads the SQLMesh context."""
+    def _get_or_create_sqlmesh_context(self):
+        """Load (or return cached) SQLMesh context for the current project settings.
+
+        A per-call cache keyed on (project_dir, config_name, gateway_name) is used
+        so that changing any of these values produces a fresh context rather than
+        silently reusing a stale one.
+        """
+        key = (
+            self.project_dir,
+            self._get_config_name(),
+            self._get_gateway_name(),
+        )
+        if not hasattr(self, "_sqlmesh_context_cache"):
+            self._sqlmesh_context_cache: dict = {}
+        if key in self._sqlmesh_context_cache:
+            return self._sqlmesh_context_cache[key]
+
         try:
             from sqlmesh.core.context import Context as SQLMeshContext
 
@@ -174,6 +135,7 @@ class SQLMeshTemplater(JinjaTemplater):
                 gateway=self._get_gateway_name(),
             )
             templater_logger.info("Successfully created SQLMesh context")
+            self._sqlmesh_context_cache[key] = context
             return context
         except Exception as e:
             raise SQLTemplaterError(
@@ -182,9 +144,6 @@ class SQLMeshTemplater(JinjaTemplater):
             ) from e
 
     @large_file_check
-    @handle_sqlmesh_errors(
-        SQLTemplaterError, "Error received from SQLMesh during project compilation. "
-    )
     def process(
         self,
         *,
@@ -207,8 +166,6 @@ class SQLMeshTemplater(JinjaTemplater):
         self.project_dir = self._get_project_dir()
         fname_absolute_path = os.path.abspath(fname) if fname != "stdin" else fname
 
-        # NOTE: SQLMesh exceptions are caught and handled safely for pickling by the outer
-        # `handle_sqlmesh_errors` decorator.
         return self._unsafe_process(fname_absolute_path, in_str, config)
 
     def _unsafe_process(self, fname, in_str=None, config=None):
@@ -230,10 +187,8 @@ class SQLMeshTemplater(JinjaTemplater):
         templater_logger.info(f"Rendering SQLMesh model: {model_name}")
 
         try:
-            rendered_ast = self.sqlmesh_context.render(
+            rendered_ast = self._get_or_create_sqlmesh_context().render(
                 model_name,
-                expand=True,  # Expand all macros and dependencies
-                no_format=True,  # Don't format, let SQLFluff handle that
             )
             # Convert SQLGlot AST to SQL string
             rendered_sql = (
